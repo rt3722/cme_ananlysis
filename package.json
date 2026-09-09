@@ -1,0 +1,11 @@
+{
+  "name": "cme-analysis",
+  "private": true,
+  "type": "module",
+  "description": "Evidence probe for CME (Commodity Market Exchange) on Robinhood Chain 4663",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node scripts/probe.mjs",
+    "selftest": "node scripts/selftest.mjs"
+  }
+}
