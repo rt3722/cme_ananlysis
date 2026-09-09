@@ -6,6 +6,8 @@
 
 This file is the working brief for Claude Code. It states **what must be accomplished** and **what done looks like**. It does not prescribe implementation methods. Infer methods from the chain, the docs, and the live contracts.
 
+Connectors available to this workspace: **GitHub**, **Railway**, **Replit**. Use them as suggested in §8. Every finished task must land in this GitHub repo (§9).
+
 ---
 
 ## 0. How to use this repo
@@ -17,6 +19,8 @@ Work through the tasks in order unless a later task is blocked on an earlier one
 3. A clear statement of the remaining gap vs the **end goal**.
 
 Do not treat project docs or tweets as ground truth until they match on-chain behavior.
+
+A task is not done until its verdict, evidence, and artifacts are **pushed to this GitHub repo**. Chat output alone does not count.
 
 ---
 
@@ -344,3 +348,94 @@ The project is successful when **all** of the following are true, or each is exp
 5. Task N outline.
 
 Stop and write evidence before jumping to architecture opinions.
+
+---
+
+## 8. Connectors — where to use which (suggestions)
+
+These are suggestions, not a required toolchain. Pick the one that matches the job. Do not stall a task because a connector is unused.
+
+### GitHub connector — default, required for output
+
+**Use for:** this repo (`rt3722/cme_ananlysis`). Read the brief, commit findings, store artifacts, open issues for blocked work, keep history.
+
+**Appropriate when:**
+
+- Publishing a task verdict (`findings/task-A.md`, etc.).
+- Storing tables, PoolKeys, tx lists, bytecode dumps, decompile output, screenshots, JSON snapshots.
+- Updating this README if on-chain reality changes.
+- Tracking “blocked on CME team” items as issues.
+
+**Not for:** running long jobs or installing heavy compilers. GitHub is the archive, not the compute.
+
+### Replit connector — scratch and short probes
+
+**Use for:** interactive, throwaway, or short-lived work that needs a REPL, a small script, or a notebook.
+
+**Appropriate when:**
+
+- One-shot RPC reads (code, storage, feed price, last buyback).
+- Sketching a pool-discovery script against a single CA.
+- Trying an open-source CLI that installs quickly (cast, a small Node RPC script).
+- Drafting a table before it is cleaned up and committed.
+
+**Not for:** keepers, 24/7 monitors, multi-hour decompiles, or anything that must survive closing the tab. Copy anything worth keeping to GitHub before the Repl dies.
+
+### Railway connector — durable compute and services
+
+**Use for:** work that must stay up, install heavier open-source tooling, or run on a schedule.
+
+**Appropriate when:**
+
+- Installing / running heavier open-source tools that do not fit a Repl well (Heimdall, Gigahorse + Soufflé, long bytecode jobs).
+- A liveness watcher for the feed, keeper, buyback, or official site (Task I, K, L) that should keep writing snapshots.
+- A small always-on API or worker that records “last update timestamp” so Task I is not a one-off curl.
+- Repeating a scan of new launches vs unofficial pools (Task C, D, M).
+
+**Not for:** the system of record. Railway holds running jobs. GitHub holds the conclusions. If Railway has a result and GitHub does not, the task is unfinished.
+
+### Suggested mapping (optional)
+
+| Work | Suggest |
+|---|---|
+| Read brief / commit verdicts / artifacts | GitHub |
+| Quick `eth_call` / storage / explorer cross-check | Replit |
+| Decompile, Soufflé/Gigahorse, long install | Railway |
+| Feed / buyback heartbeat over hours | Railway, then snapshot → GitHub |
+| Draft change-request one-pagers (Task N) | Write locally or Replit, **ship on GitHub** |
+
+If a connector is disconnected, say so in the task verdict and still write the finding to GitHub by whatever path works.
+
+---
+
+## 9. Required: push findings to GitHub
+
+**End of every task, and at the end of every session,** use the **GitHub connector** to put work in `rt3722/cme_ananlysis` on `main` (or a clearly named branch + PR).
+
+Push all of the following that exist:
+
+- Analysis writeups and verdicts (pass / fail / blocked + gap vs end goal).
+- Evidence: tx hashes, PoolKeys, storage reads, explorer links, dated RPC snapshots.
+- Artifacts: bytecode `.hex`/`.bin`, decompiled pseudo-source (labeled reconstruction), ABIs, JSON, screenshots.
+- Scripts that produced the evidence (so the next session can rerun).
+- Railway/Replit project URLs and what they are running, if any.
+
+Suggested layout (adapt if needed, keep it consistent):
+
+```text
+findings/task-A.md
+findings/task-B.md
+...
+artifacts/
+  bytecode/
+  decompile/
+  snapshots/
+scripts/
+```
+
+Rules:
+
+- Chat is not the archive. If it is not in this repo, it did not happen.
+- Label reconstructions. Never present Heimdall/Gigahorse output as official CME source.
+- Do not commit secrets (RPC keys, Railway tokens, Replit secrets).
+- After the last task of a session, make one commit (or PR) titled with the tasks closed, e.g. `findings: A B I snapshot`.
