@@ -381,6 +381,178 @@ async function phaseLaunches() {
   }
 }
 
+// ------------------------------------------------- phase: feed (Task I, K)
+
+// topic0 0x4606eeab... == keccak("PriceUpdated(bytes32,uint256,uint64,address)").
+// Recovered by exhaustive search over candidate signatures, not from source:
+// it is absent from 4byte.directory, so this is grade R until the team
+// publishes source. The 2-indexed/2-data shape observed on chain (3 topics,
+// 64 bytes of data) matches the recovered signature, which is what makes the
+// per-field decode below trustworthy enough to act on.
+const PRICE_UPDATED_SIG = 'PriceUpdated(bytes32,uint256,uint64,address)';
+
+const b32ToAscii = (w) => {
+  try {
+    const s = (w || '').replace(/^0x/, '');
+    const bytes = [];
+    for (let i = 0; i < 64; i += 2) {
+      const b = parseInt(s.substr(i, 2), 16);
+      if (b === 0) continue;
+      if (b < 0x20 || b > 0x7e) return null;
+      bytes.push(b);
+    }
+    return bytes.length ? String.fromCharCode(...bytes) : null;
+  } catch { return null; }
+};
+
+function decodePriceUpdated(log) {
+  const d = decodeWords(log.data);
+  return {
+    key: log.topics[1],
+    keyAscii: b32ToAscii(log.topics[1]),
+    updater: wordToAddress(log.topics[2]),
+    price: d[0] != null ? BigInt(d[0]).toString() : null,
+    feedTimestamp: d[1] != null ? Number(BigInt(d[1])) : null,
+    block: Number(BigInt(log.blockNumber)),
+    tx: log.transactionHash,
+  };
+}
+
+async function phaseFeed() {
+  const feed = DOC_ADDRESSES.CommodityPriceFeed;
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const bt = await measureBlockTime(head, 200000);
+  const spb = bt ? bt.secondsPerBlock : 0.1;
+  const hours = Number(process.env.FEED_HOURS || 6);
+  const maxBack = Math.ceil((hours * 3600) / Math.max(spb, 0.001));
+  emit('FEED_PLAN', { feed, head, secondsPerBlock: spb, hours, maxBack, topic0: keccakHex(PRICE_UPDATED_SIG), sig: PRICE_UPDATED_SIG });
+
+  const { logs, scannedFrom, truncated } = await scanLogsBack(
+    { address: feed, topics: [keccakHex(PRICE_UPDATED_SIG)] },
+    { head, want: 100000, maxBack, chunk: Number(process.env.LOG_CHUNK || 20000),
+      onProgress: (p) => note('  feedscan', p.from, '-', p.to, 'got', p.got, 'tot', p.total) });
+
+  const events = logs.map(decodePriceUpdated);
+  // The event carries its own uint64 timestamp, so cadence needs no block lookups.
+  const byKey = new Map();
+  const updaters = {};
+  for (const e of events) {
+    if (!byKey.has(e.key)) byKey.set(e.key, []);
+    byKey.get(e.key).push(e);
+    updaters[e.updater] = (updaters[e.updater] || 0) + 1;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const perAsset = [];
+  for (const [key, evs] of byKey) {
+    const ts = evs.map((e) => e.feedTimestamp).filter((x) => x != null).sort((a, b) => b - a);
+    const g = gapStats(ts);
+    perAsset.push({
+      key, keyAscii: evs[0].keyAscii, updates: evs.length,
+      lastTs: ts[0] ?? null,
+      lastIso: ts[0] ? new Date(ts[0] * 1000).toISOString() : null,
+      ageSec: ts[0] ? now - ts[0] : null,
+      lastPrice: evs.find((e) => e.feedTimestamp === ts[0])?.price ?? null,
+      medianGapSec: g.medianSec ?? null, meanGapSec: g.meanSec ?? null,
+      minGapSec: g.minSec ?? null, maxGapSec: g.maxSec ?? null, p90GapSec: g.p90Sec ?? null,
+    });
+  }
+  perAsset.sort((a, b) => (b.updates - a.updates));
+
+  const allTs = events.map((e) => e.feedTimestamp).filter(Boolean).sort((a, b) => b - a);
+  emit('FEED_SUMMARY', {
+    feed, sig: PRICE_UPDATED_SIG, windowHours: hours,
+    scannedFrom, scannedTo: head, truncated,
+    events: events.length, distinctAssets: byKey.size,
+    updaters,
+    newestFeedTs: allTs[0] ?? null,
+    newestIso: allTs[0] ? new Date(allTs[0] * 1000).toISOString() : null,
+    secondsSinceNewest: allTs[0] ? now - allTs[0] : null,
+    oldestFeedTs: allTs[allTs.length - 1] ?? null,
+    // Per-asset staleness is the number that matters: the docs promise 60s
+    // per asset, not 60s for "some asset somewhere".
+    worstAssetAgeSec: perAsset.reduce((m, a) => Math.max(m, a.ageSec ?? 0), 0),
+    worstAssetMaxGapSec: perAsset.reduce((m, a) => Math.max(m, a.maxGapSec ?? 0), 0),
+    assetsOver60s: perAsset.filter((a) => (a.medianGapSec ?? 0) > 60).length,
+    assetsOver300s: perAsset.filter((a) => (a.maxGapSec ?? 0) > 300).length,
+    assetsOver3600s: perAsset.filter((a) => (a.maxGapSec ?? 0) > 3600).length,
+  });
+  for (let i = 0; i < perAsset.length; i += 12) {
+    emit(`FEED_ASSETS_${Math.floor(i / 12)}`, perAsset.slice(i, i + 12));
+  }
+
+  // Live reads against the discovered asset keys.
+  const live = [];
+  for (const a of perAsset.slice(0, 40)) {
+    const pr = await ethCall(feed, 'price(bytes32)', [a.key.replace(/^0x/, '')]);
+    const la = await ethCall(feed, 'latest(bytes32)', [a.key.replace(/^0x/, '')]);
+    live.push({ key: a.key, keyAscii: a.keyAscii,
+      price: pr ? decodeWords(pr).map((w) => BigInt(w).toString()) : null,
+      latest: la ? decodeWords(la).map((w) => BigInt(w).toString()) : null });
+  }
+  emit('FEED_LIVE_READS', { count: live.length, reads: live });
+  emit('FEED_STATE', {
+    assetCount: await ethCall(feed, 'assetCount()'),
+    paused: await ethCall(feed, 'paused()'),
+    defaultAdmin: await ethCall(feed, 'defaultAdmin()'),
+    defaultAdminDelay: await ethCall(feed, 'defaultAdminDelay()'),
+    pendingDefaultAdmin: await ethCall(feed, 'pendingDefaultAdmin()'),
+  });
+}
+
+async function phaseBuyback() {
+  const bb = DOC_ADDRESSES.Buyback;
+  const cme = DOC_ADDRESSES.CME;
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const bt = await measureBlockTime(head, 200000);
+  const spb = bt ? bt.secondsPerBlock : 0.1;
+
+  emit('BUYBACK_STATE', {
+    address: bb,
+    ethBalance: await rpcOk('eth_getBalance', [bb, 'latest']),
+    cmeBalance: await ethCall(cme, 'balanceOf(address)', [encAddress(bb)]),
+    totalEthSpent: await ethCall(bb, 'totalEthSpent()'),
+    poolKey: await ethCall(bb, 'poolKey()'),
+    owner: await ethCall(bb, 'owner()'),
+    cme: await ethCall(bb, 'cme()'),
+    poolManager: await ethCall(bb, 'poolManager()'),
+    note: 'poolKey()/totalEthSpent() names recovered by selector search — grade R',
+  });
+
+  // $CME supply vs burns. Transfer(_, 0x0, _) is the burn signal.
+  const days = Number(process.env.BURN_DAYS || 14);
+  const maxBack = Math.ceil((days * 86400) / Math.max(spb, 0.001));
+  const { logs, scannedFrom, truncated } = await scanLogsBack({
+    address: cme,
+    topics: [keccakHex('Transfer(address,address,uint256)'), null,
+             '0x0000000000000000000000000000000000000000000000000000000000000000'],
+  }, { head, want: 5000, maxBack, chunk: Number(process.env.LOG_CHUNK || 20000),
+       onProgress: (p) => note('  burnscan', p.from, '-', p.to, 'got', p.got, 'tot', p.total) });
+
+  const blocks = [...new Set(logs.map((l) => Number(BigInt(l.blockNumber))))].sort((a, b) => b - a);
+  const times = new Map();
+  for (const b of blocks.slice(0, 200)) times.set(b, await blockTime(b));
+  const now = Math.floor(Date.now() / 1000);
+  const newestTs = times.get(blocks[0]) ?? null;
+
+  emit('CME_BURNS', {
+    token: cme, windowDays: days, scannedFrom, scannedTo: head, truncated,
+    burnEvents: logs.length,
+    totalSupply: await ethCall(cme, 'totalSupply()'),
+    newestBurnBlock: blocks[0] ?? null,
+    newestBurnTs: newestTs,
+    newestBurnIso: newestTs ? new Date(newestTs * 1000).toISOString() : null,
+    secondsSinceLastBurn: newestTs ? now - newestTs : null,
+    burnedInWindow: logs.reduce((a, l) => a + (l.data && l.data !== '0x' ? BigInt(l.data) : 0n), 0n).toString(),
+    recent: logs.slice(-20).reverse().map((l) => ({
+      block: Number(BigInt(l.blockNumber)), tx: l.transactionHash,
+      from: wordToAddress(l.topics[1]),
+      value: l.data && l.data !== '0x' ? BigInt(l.data).toString() : null,
+      ts: times.get(Number(BigInt(l.blockNumber))) ?? null,
+    })),
+  });
+}
+
 // ------------------------------------------------------------ phase: logs
 
 /** Decode a canonical v4 Initialize log into a PoolKey. */
@@ -469,6 +641,8 @@ async function main() {
       else if (p === 'liveness') await phaseLiveness();
       else if (p === 'launches') await phaseLaunches();
       else if (p === 'logs') await phaseLogs();
+      else if (p === 'feed') await phaseFeed();
+      else if (p === 'buyback') await phaseBuyback();
       else note('unknown phase', p);
       ran.push(p);
     } catch (e) {
