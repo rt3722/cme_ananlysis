@@ -288,18 +288,27 @@ export async function measureBlockTime(head, back = 100000) {
 export async function scanLogsBack(filter, { head, want = 400, maxBack = 2000000, chunk = 20000, onProgress } = {}) {
   const logs = [];
   const floor = Math.max(0, head - maxBack);
-  let to = head, cur = chunk, windows = 0, truncated = false;
+  let to = head, cur = chunk, windows = 0, truncated = false, shrinks = 0;
+  // Largest window the node has actually accepted. Without this the scanner
+  // ratchets down on the first rejection and never recovers, which turns a
+  // multi-day scan into millions of tiny windows.
+  let bestKnownGood = 0;
   while (to > floor && logs.length < want) {
     const from = Math.max(floor, to - cur);
     const { result, error } = await rpc('eth_getLogs', [{ ...filter, fromBlock: numToHex(from), toBlock: numToHex(to) }], { retries: 1 });
     if (error) {
-      if (cur > 200) { cur = Math.floor(cur / 4); continue; }
-      to = from - 1; cur = chunk; truncated = true; continue;
+      if (cur > 500) { cur = Math.max(500, Math.floor(cur / 4)); shrinks++; continue; }
+      to = from - 1; truncated = true;
+      cur = bestKnownGood || chunk;
+      continue;
     }
     windows++;
+    bestKnownGood = Math.max(bestKnownGood, cur);
     logs.push(...result);
-    if (onProgress) onProgress({ from, to, got: result.length, total: logs.length });
+    if (onProgress) onProgress({ from, to, got: result.length, total: logs.length, window: cur });
     to = from - 1;
+    // Creep back toward the requested chunk after a rejection forced us down.
+    if (cur < chunk) cur = Math.min(chunk, cur * 2);
   }
-  return { logs, scannedFrom: Math.max(floor, to), scannedTo: head, windows, truncated };
+  return { logs, scannedFrom: Math.max(floor, to), scannedTo: head, windows, shrinks, truncated };
 }

@@ -1,0 +1,141 @@
+{
+  "_note": "Task A/B map. Produced by scripts/probe.mjs PROBE=map on the Railway runner. Transcribed from its ##ADDR_*## / ##SELS_*## log sections.",
+  "capturedAt": "2026-09-09T23:37:26Z",
+  "chain": {
+    "chainId": "0x1237",
+    "chainIdDec": 4663,
+    "rpc": "https://rpc.mainnet.chain.robinhood.com",
+    "clientVersion": "nitro/v3.11.4-rc.3-7d5ac27/linux-arm64/go1.25.14",
+    "head": 58944748,
+    "headTimestamp": 1788997044,
+    "headTimeIso": "2026-09-09T23:37:24.000Z",
+    "measuredSecondsPerBlock": 0.1005
+  },
+  "contracts": {
+    "LaunchpadV4": {
+      "address": "0x741aE845F4F11B43467e7D0be991AD814E6Fc522",
+      "hasCode": true, "codeSize": 24441,
+      "codeHash": "0x4c37b8f5ed7f9a56ce537ac4e340b050d5aaaf4a2cb4aaeab905e31f8b7fef96",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": "0x1220201a5fafd590d8448245261a03d5403076eb0ccad0658c04e04e4ddd18d55515",
+      "isProxy": false, "proxySlots": {},
+      "selectorCount": 113,
+      "embeddedAddresses": ["0x3d602d80600a3d3981f3363d3d373d3d3d363d73"],
+      "embeddedNote": "that constant is the EIP-1167 minimal-proxy runtime prefix, so the launchpad deploys clones",
+      "liveViews": {
+        "owner()": "0xb365f2602efa59b876b6dac1cc5c040a67f95c82",
+        "treasury()": "0x338a3b6b0eabc0efdd1aea33e81e57c102158d8c",
+        "launchCount()": 72,
+        "poolManager()": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        "router()": "0x92584892ec2663b1969dffdeb5930e54fc5aacd1",
+        "DEFAULT_ADMIN_ROLE()": "0x00"
+      },
+      "blockscout": "HTTP 403 from runner",
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "LaunchRouterV4": {
+      "address": "0x92584892EC2663b1969DffDeB5930e54FC5AAcd1",
+      "hasCode": true, "codeSize": 9009,
+      "codeHash": "0x42d5d0476ddaa2512e79883385f556eacbd57032a482fb688dd94a4d9369bccd",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": "0x1220371d332f6341ad0cd3b9efc78a8af8c3f4ff6c0e4ddec17bdebed579861e34ce",
+      "isProxy": false, "selectorCount": 35,
+      "liveViews": {
+        "usdg()": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+        "weth()": "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+      },
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "BasketRouterV4": {
+      "address": "0x1ae8E086Daa6Bf7D81F99f08c0f3b755BaaDA348",
+      "hasCode": true, "codeSize": 5430,
+      "codeHash": "0x9d85369772268134bdd62f972957b194c3f9cf04da92cc9098cc92d401e81931",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": "0x122070ead0940ce369ef9320b3c236914d795d6ef1d9ab3f6cb1d2ed3b0b9b89a772",
+      "isProxy": false, "selectorCount": 26,
+      "liveViews": {
+        "router()": "0x92584892ec2663b1969dffdeb5930e54fc5aacd1",
+        "usdg()": "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+      },
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "CME": {
+      "address": "0xe2324FF2a59F8eCBa8c321c6466e59121C00e795",
+      "hasCode": true, "codeSize": 3248,
+      "codeHash": "0xc714be92376dbbf4fdadccd16a1c49a5e0c41463e7c704b76770bde1d6240fb7",
+      "solcVersion": "0.8.35",
+      "solcNote": "the only contract in the set not compiled with 0.8.26",
+      "metadataIpfs": "0x1220f8f8df1aef409554acec1774e66d855cbdc94f6a3e199a378f5ba9fe2a083266",
+      "isProxy": false, "selectorCount": 25,
+      "liveViews": {
+        "name()": "Commodity Market Exchange",
+        "symbol()": "CME",
+        "decimals()": 18,
+        "totalSupply()": "999685351807335209822007281"
+      },
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "Buyback": {
+      "address": "0x4551E406A80Fd9249e47A5A1A38b7089D9b9C226",
+      "hasCode": true, "codeSize": 3461,
+      "codeHash": "0xe1997be7fffeb2aac465aa6583b2013d50c05093eed5137724c20a22ea0bb690",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": "0x122034180cedf092c559eb87a47b57ead4f6b7f58215023f57945b1d9f6fd873346e",
+      "isProxy": false, "selectorCount": 10,
+      "liveViews": {
+        "owner()": "0xb365f2602efa59b876b6dac1cc5c040a67f95c82",
+        "poolManager()": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        "cme()": "0xe2324ff2a59f8ecba8c321c6466e59121c00e795"
+      },
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "CommodityPriceFeed": {
+      "address": "0x3B784715e1ecFDC6A59707d5b05e5bc898159ab7",
+      "hasCode": true, "codeSize": 7260,
+      "codeHash": "0x8e51597f26ebe7a604581d6cc17506543b507fd780ce9c2c0aee7517f52c5da1",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": "0x1220aeffe393b385fbfc622b203c3e92f42d6a539f03dc975d5d95a02fec3d96026d",
+      "isProxy": false, "selectorCount": 33,
+      "liveViews": {
+        "owner()": "0xb365f2602efa59b876b6dac1cc5c040a67f95c82",
+        "paused()": false,
+        "KEEPER_ROLE()": "0xfc8737ab85eb45125971625a9ebdb75cc78e01d5c1fa80c4c6e5203f47bc4fab",
+        "PAUSER_ROLE()": "0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a",
+        "DEFAULT_ADMIN_ROLE()": "0x00"
+      },
+      "roleHashesVerified": "KEEPER_ROLE()/PAUSER_ROLE() equal keccak256 of those literal strings",
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    },
+    "PoolManagerV4": {
+      "address": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+      "hasCode": true, "codeSize": 24009,
+      "codeHash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+      "solcVersion": "0.8.26",
+      "metadataIpfs": null,
+      "metadataNote": "CBOR footer is only 10 bytes (a164736f6c634300081a) -- solc version, no IPFS hash. The other six all carry one.",
+      "isProxy": false, "selectorCount": 39,
+      "embeddedAddresses": [
+        "0xfffd8963efd1fc6a506488495d951d5163961682",
+        "0xfffd8963efd1fc6a506488495d951d5263988d26",
+        "0xffffffffffffffffffffffffffffffffffffffff"
+      ],
+      "embeddedNote": "0x...5263988d26 is Uniswap's canonical MAX_SQRT_PRICE constant; 0x...5163961682 is a near-miss variant. Flagged for follow-up against README section 6's warning that this chain's Uniswap deployment is modified. NOT yet confirmed as a modification.",
+      "liveViews": { "owner()": "0x2bad8182c09f50c8318d769245bea52c32be46cd" },
+      "ownerNote": "different owner from the five CME contracts -- consistent with a chain-level Uniswap deployment CME does not control",
+      "confirmedSelectors": {
+        "0x6276cbbe": "initialize((address,address,uint24,int24,address),uint160)",
+        "0xf3cd914c": "swap((address,address,uint24,int24,address),(bool,int256,uint160),bytes)",
+        "0x48c89491": "unlock(bytes)",
+        "0x1e2eaeaf": "extsload(bytes32)"
+      },
+      "sourcify": { "checkAll": "HTTP 404", "fullMatchMetadata": "HTTP 404" }
+    }
+  },
+  "selectorSets": {
+    "CommodityPriceFeed": ["0x01ffc9a7","0x022d63fb","0x0aa6220b","0x16c38b3c","0x248a9ca3","0x2f2ff15d","0x364bc15a","0x36568abe","0x5c975abb","0x634e93da","0x649a5ec7","0x721d8847","0x79feb107","0x84ef8ffc","0x88f3543a","0x8da5cb5b","0x8ecd249a","0x91d14854","0x976057c1","0xa1eda53c","0xa217fddf","0xcc8463c8","0xcefc1429","0xcf6eefb7","0xd547741f","0xd602b9fd","0xe63ab1e9","0xe72aaaed","0xeafe7a74","0xf6dc2a03","0xfa2965fd","0xfb61b3ff","0xffffffff"],
+    "Buyback": ["0x0d1a9c9d","0x0dcaa63e","0x182148ef","0x2786cb73","0x715018a6","0x8da5cb5b","0x91dd7346","0x92d3b886","0xdc4c90d3","0xf2fde38b"],
+    "CME": ["0x06fdde03","0x095ea7b3","0x18160ddd","0x23b872dd","0x313ce567","0x391434e3","0x42966c68","0x4a1406b1","0x4b637e8f","0x4e487b71","0x536dac9b","0x53cd512a","0x70a08231","0x7165485d","0x7284e416","0x79cc6790","0x7dc7a0d9","0x95d89b41","0xa9059cbb","0xabb1dc44","0xd5f39488","0xdd62ed3e","0xe602df05","0xec442f05","0xfb7f21eb"],
+    "LaunchRouterV4": ["0x020f8939","0x02669b52","0x04e45aaf","0x050d584d","0x095ea7b3","0x09c3826b","0x0dc91306","0x125012df","0x162908e3","0x16b90077","0x1ab7da6b","0x1b2c9ea5","0x216c4b1f","0x23b872dd","0x2d8d266b","0x39325ead","0x3ee5aeb5","0x3fc8cef3","0x4e487b71","0x5274afe7","0x5571170d","0x5fd8ca87","0x70a08231","0x737297de","0x764c870f","0x7d8861cb","0xa3f00753","0xa9059cbb","0xb858183f","0xbb8872f5","0xc6dd0e79","0xcd7cc01a","0xda3d23a7","0xf5b91b7b","0xfffd6355"],
+    "LaunchpadV4": ["0x01ffc9a7","0x022d63fb","0x0256965f","0x03d9f247","0x0476982d","0x069927f4","0x06dfcc65","0x083e24e4","0x0aa6220b","0x0b0d9c09","0x0b8ff8c6","0x10c137ef","0x13964c88","0x15f773f9","0x162908e3","0x16555ff9","0x173fd1db","0x18a4c3c3","0x19ca5ebb","0x1b05394b","0x1dff3231","0x1e2eaeaf","0x1e4c7292","0x1ed00d7f","0x1fe1e13d","0x23b872dd","0x248a9ca3","0x27cca59f","0x29610465","0x2cc0a5b3","0x2d35e7ed","0x2f2ff15d","0x2f3a3d5d","0x313b65df","0x32870f2f","0x334bd919","0x36568abe","0x3729bb9a","0x3bc340c2","0x3ca786c3","0x3ee5aeb5","0x42bcb05b","0x4479aa1d","0x454b0608","0x45c3193d","0x46ca626b","0x48c89491","0x4e487b71","0x4ff799c5","0x5274afe7","0x5360271a","0x55dc4711","0x58d5cfaf","0x59fed94f","0x5c6d8da1","0x5fd8ca87","0x61164011","0x618701e5","0x61d027b3","0x62dd1f0a","0x634e93da","0x649a5ec7","0x67ead7a3","0x70a08231","0x73e7757b","0x7953ed29","0x7965db0b","0x7d8861cb","0x8199f5f3","0x84ef8ffc","0x85b12c7c","0x8da5cb5b","0x91d14854","0x91dd7346","0x92249189","0x93687c0b","0x9cc0a471","0xa1eda53c","0xa217fddf","0xa9059cbb","0xaa66797b","0xab878a8a","0xab92bc71","0xb6c77d67","0xc50497ae","0xc52a9bd3","0xc6dd0e79","0xcc8463c8","0xcefc1429","0xcf6eefb7","0xd5025625","0xd547741f","0xd56c7509","0xd602b9fd","0xd7b2559b","0xda2076d9","0xda3d23a7","0xdc4c90d3","0xe22b1552","0xe2517d3f","0xe5beeeb6","0xed5a13a2","0xee338ea7","0xf0f44260","0xf11f4461","0xf27f4948","0xf40cf01d","0xf64548e2","0xf6f4a38f","0xf887ea40","0xfa02716d","0xffff0000","0xffffffff"]
+  }
+}
