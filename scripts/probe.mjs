@@ -614,6 +614,94 @@ async function phaseLogs() {
   emit('POOLS_SUMMARY', { total: flat.length, hookHist, feeHist, topCurrencies: Object.entries(curHist).sort((a,b)=>b[1]-a[1]).slice(0,30) });
 }
 
+// -------------------------------------------------- phase: tax (Task C)
+
+/**
+ * Decide whether a token takes a tax at the ERC-20 layer, from chain data
+ * rather than from the absence of guessed selector names.
+ *
+ * The test: take transactions that call transfer(to,amount) or
+ * transferFrom(from,to,amount) directly on the token, and compare the amount
+ * in the calldata against the Transfer event(s) the call produced. A taxed
+ * token either credits the recipient less than the calldata amount or emits
+ * an extra Transfer to a fee sink in the same transaction. An untaxed one
+ * emits exactly one Transfer whose value equals the calldata amount.
+ */
+async function checkTokenTax(token, { head, maxBack, chunk, sample = 25 }) {
+  const TRANSFER = keccakHex('Transfer(address,address,uint256)');
+  const { logs } = await scanLogsBack({ address: token, topics: [TRANSFER] },
+    { head, want: 400, maxBack, chunk });
+
+  const byTx = new Map();
+  for (const l of logs) {
+    if (!byTx.has(l.transactionHash)) byTx.set(l.transactionHash, []);
+    byTx.get(l.transactionHash).push(l);
+  }
+
+  const SEL_TRANSFER = selector('transfer(address,uint256)');
+  const SEL_TRANSFER_FROM = selector('transferFrom(address,address,uint256)');
+  const cases = [];
+  for (const [hash, evs] of [...byTx].reverse()) {
+    if (cases.length >= sample) break;
+    const tx = await rpcOk('eth_getTransactionByHash', [hash]);
+    if (!tx || !tx.to || tx.to.toLowerCase() !== token.toLowerCase()) continue;
+    const sel = (tx.input || '0x').slice(0, 10);
+    let calldataAmount = null, to = null;
+    if (sel === SEL_TRANSFER) {
+      const w = decodeWords('0x' + tx.input.slice(10));
+      to = wordToAddress(w[0]); calldataAmount = w[1] ? BigInt(w[1]) : null;
+    } else if (sel === SEL_TRANSFER_FROM) {
+      const w = decodeWords('0x' + tx.input.slice(10));
+      to = wordToAddress(w[1]); calldataAmount = w[2] ? BigInt(w[2]) : null;
+    } else continue;
+    if (calldataAmount == null) continue;
+
+    const mine = evs.filter((l) => l.address.toLowerCase() === token.toLowerCase());
+    const credited = mine
+      .filter((l) => wordToAddress(l.topics[2]).toLowerCase() === (to || '').toLowerCase())
+      .reduce((a, l) => a + BigInt(l.data), 0n);
+    const totalMoved = mine.reduce((a, l) => a + BigInt(l.data), 0n);
+    cases.push({
+      tx: hash, method: sel === SEL_TRANSFER ? 'transfer' : 'transferFrom',
+      recipient: to,
+      calldataAmount: calldataAmount.toString(),
+      creditedToRecipient: credited.toString(),
+      transferEventsInTx: mine.length,
+      totalMovedInTx: totalMoved.toString(),
+      taxed: credited !== calldataAmount || mine.length > 1,
+      shortfall: (calldataAmount - credited).toString(),
+    });
+  }
+
+  const taxed = cases.filter((c) => c.taxed);
+  return {
+    token, transfersSampled: logs.length, directCallsChecked: cases.length,
+    taxedCases: taxed.length,
+    verdict: cases.length === 0 ? 'INCONCLUSIVE - no direct transfer calls in window'
+      : taxed.length === 0 ? 'NO TOKEN-LAYER TAX - every direct transfer credited the full calldata amount'
+      : 'TOKEN-LAYER TAX OR FEE SPLIT OBSERVED',
+    cases,
+  };
+}
+
+async function phaseTax() {
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const bt = await measureBlockTime(head, 200000);
+  const spb = bt ? bt.secondsPerBlock : 0.1;
+  const maxBack = Math.ceil((Number(process.env.TAX_DAYS || 2) * 86400) / Math.max(spb, 0.001));
+  const chunk = Number(process.env.LOG_CHUNK || 5000);
+
+  const targets = (process.env.TAX_TOKENS || DOC_ADDRESSES.CME).split(',').map((x) => x.trim()).filter(Boolean);
+  for (const t of targets) {
+    note('tax check', t);
+    try {
+      emit(`TAX_${t.slice(0, 10)}`, await checkTokenTax(t, { head, maxBack, chunk }));
+    } catch (e) {
+      emit(`TAX_${t.slice(0, 10)}`, { token: t, __error: String(e && e.message || e) });
+    }
+  }
+}
+
 // ------------------------------------------------------------------- main
 
 async function main() {
@@ -643,6 +731,7 @@ async function main() {
       else if (p === 'logs') await phaseLogs();
       else if (p === 'feed') await phaseFeed();
       else if (p === 'buyback') await phaseBuyback();
+      else if (p === 'tax') await phaseTax();
       else note('unknown phase', p);
       ran.push(p);
     } catch (e) {
