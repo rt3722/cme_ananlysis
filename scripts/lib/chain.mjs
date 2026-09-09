@@ -46,8 +46,14 @@ export async function bs(path, { timeoutMs = 30000 } = {}) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
+    // Blockscout fronted by a bot filter: a bare fetch UA gets 403 from a
+    // datacenter IP, so present a browser-ish one.
     const res = await fetch(`${BLOCKSCOUT}${path}`, {
-      headers: { accept: 'application/json' },
+      headers: {
+        accept: 'application/json,text/plain,*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      },
       signal: ac.signal,
     });
     const text = await res.text();
@@ -251,3 +257,49 @@ export async function readProxySlots(address) {
 }
 
 export { keccak256, keccakHex, selector, toHex, utf8 };
+
+// ------------------------------------------------- block times & log scans
+
+const blockTimeCache = new Map();
+
+/** Timestamp (unix seconds) for a block number, memoised. */
+export async function blockTime(n) {
+  if (blockTimeCache.has(n)) return blockTimeCache.get(n);
+  const b = await rpcOk('eth_getBlockByNumber', [numToHex(n), false]);
+  const ts = b ? toNum(b.timestamp) : null;
+  blockTimeCache.set(n, ts);
+  return ts;
+}
+
+/** Measured seconds-per-block, from two blocks far apart. */
+export async function measureBlockTime(head, back = 100000) {
+  const lo = Math.max(1, head - back);
+  const [tHead, tLo] = [await blockTime(head), await blockTime(lo)];
+  if (tHead == null || tLo == null || head === lo) return null;
+  return { head, lo, tHead, tLo, secondsPerBlock: (tHead - tLo) / (head - lo) };
+}
+
+/**
+ * Scan eth_getLogs backwards from `head` in adaptive chunks until `want`
+ * logs are collected or `maxBack` blocks are covered. Shrinks the window
+ * when the node rejects a range, which is how public RPCs signal a cap.
+ * Returns { logs, scannedFrom, scannedTo, windows, truncated }.
+ */
+export async function scanLogsBack(filter, { head, want = 400, maxBack = 2000000, chunk = 20000, onProgress } = {}) {
+  const logs = [];
+  const floor = Math.max(0, head - maxBack);
+  let to = head, cur = chunk, windows = 0, truncated = false;
+  while (to > floor && logs.length < want) {
+    const from = Math.max(floor, to - cur);
+    const { result, error } = await rpc('eth_getLogs', [{ ...filter, fromBlock: numToHex(from), toBlock: numToHex(to) }], { retries: 1 });
+    if (error) {
+      if (cur > 200) { cur = Math.floor(cur / 4); continue; }
+      to = from - 1; cur = chunk; truncated = true; continue;
+    }
+    windows++;
+    logs.push(...result);
+    if (onProgress) onProgress({ from, to, got: result.length, total: logs.length });
+    to = from - 1;
+  }
+  return { logs, scannedFrom: Math.max(floor, to), scannedTo: head, windows, truncated };
+}

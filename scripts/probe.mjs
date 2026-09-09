@@ -18,7 +18,7 @@ import {
   rpc, rpcOk, bs, ethCall, encAddress, decodeWords, decodeString, decodeBytes32String,
   decodeInt, parseMetadataFooter, extractPush4, extractPush20, readProxySlots,
   toBig, toNum, numToHex, wordToAddress, keccakHex, selector, keccak256, hexToBytes,
-  bytesToHex, RPC_URL, BLOCKSCOUT,
+  bytesToHex, RPC_URL, BLOCKSCOUT, blockTime, measureBlockTime, scanLogsBack,
 } from './lib/chain.mjs';
 import { VIEW_CALLS, PROBE_SIGS, EVENT_SIGS } from './lib/sigs.mjs';
 
@@ -226,109 +226,158 @@ function gapStats(tsDesc) {
 }
 
 async function phaseLiveness() {
-  const targets = ['CommodityPriceFeed', 'Buyback', 'LaunchpadV4', 'CME', 'PoolManagerV4', 'LaunchRouterV4'];
-  for (const name of targets) {
-    const address = DOC_ADDRESSES[name];
-    note('liveness', name);
-    const all = [];
-    for (let page = 1; page <= 4; page++) {
-      const t = await txListV1(address, { page, offset: 100 });
-      if (!t || !t.length) break;
-      all.push(...t);
-      if (t.length < 100) break;
-    }
-    const txs = all.map((t) => ({
-      hash: t.hash, ts: Number(t.timeStamp), block: Number(t.blockNumber),
-      from: t.from, method: (t.input || '0x').slice(0, 10),
-      isError: t.isError, gasUsed: t.gasUsed,
-    }));
-    const now = Math.floor(Date.now() / 1000);
-    const methodHist = {};
-    const senderHist = {};
-    for (const t of txs) {
-      methodHist[t.method] = (methodHist[t.method] || 0) + 1;
-      senderHist[t.from] = (senderHist[t.from] || 0) + 1;
-    }
-    emit(`LIVE_${name}`, {
-      address, sampled: txs.length,
-      lastTx: txs[0] || null,
-      secondsSinceLastInbound: txs[0] ? now - txs[0].ts : null,
-      newestTs: txs[0] ? txs[0].ts : null,
-      oldestTs: txs.length ? txs[txs.length - 1].ts : null,
-      failureCount: txs.filter((t) => t.isError === '1').length,
-      methodHist, senderHist,
-      interArrival: gapStats(txs.map((t) => t.ts)),
-      recent: txs.slice(0, 15),
-    });
-  }
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const bt = await measureBlockTime(head, 200000);
+  emit('BLOCKTIME', bt || { __error: 'could not measure' });
+  const spb = bt ? bt.secondsPerBlock : 0.25;
 
-  const cme = DOC_ADDRESSES.CME;
-  const tok = await bs(`/api/v2/tokens/${cme}`);
-  if (!tok.__error) emit('CME_TOKEN', tok);
-  const burns = await bs(`/api?module=account&action=tokentx&contractaddress=${cme}&address=0x0000000000000000000000000000000000000000&page=1&offset=25&sort=desc`);
-  if (burns && burns.status === '1') {
-    emit('CME_BURNS', {
-      count: burns.result.length,
-      recent: burns.result.slice(0, 15).map((t) => ({
-        hash: t.hash, ts: Number(t.timeStamp), from: t.from, to: t.to, value: t.value,
+  // How far back to scan for a day's worth of activity at the measured rate.
+  const perDay = Math.ceil(86400 / Math.max(spb, 0.01));
+  const maxBack = Math.min(Number(process.env.MAX_BLOCKS_BACK || 0) || perDay * 3, 6000000);
+  note('blocktime', spb, 'blocks/day', perDay, 'maxBack', maxBack);
+
+  const known = new Map(EVENT_SIGS.map((sg) => [keccakHex(sg), sg]));
+
+  for (const name of ['CommodityPriceFeed', 'Buyback', 'LaunchpadV4', 'CME', 'LaunchRouterV4']) {
+    const address = DOC_ADDRESSES[name];
+    note('liveness', name, address);
+    const { logs, scannedFrom, scannedTo, windows, truncated } = await scanLogsBack(
+      { address }, { head, want: 500, maxBack, chunk: Number(process.env.LOG_CHUNK || 20000),
+        onProgress: (p) => note('  scan', name, p.from, '-', p.to, 'got', p.got, 'tot', p.total) });
+
+    // Resolve timestamps for the blocks we actually saw (deduped).
+    const blocks = [...new Set(logs.map((l) => Number(BigInt(l.blockNumber))))].sort((a, b) => b - a);
+    const times = new Map();
+    for (const b of blocks.slice(0, 300)) times.set(b, await blockTime(b));
+
+    const topicHist = {};
+    for (const l of logs) {
+      const t = l.topics[0];
+      topicHist[t] = (topicHist[t] || 0) + 1;
+    }
+    const tsDesc = blocks.map((b) => times.get(b)).filter((x) => x != null);
+    const now = Math.floor(Date.now() / 1000);
+
+    emit(`LIVE_${name}`, {
+      address, logCount: logs.length, distinctBlocks: blocks.length,
+      scannedFrom, scannedTo, windows, truncated,
+      newestBlock: blocks[0] ?? null,
+      newestTs: tsDesc[0] ?? null,
+      newestIso: tsDesc[0] ? new Date(tsDesc[0] * 1000).toISOString() : null,
+      secondsSinceLastEvent: tsDesc[0] ? now - tsDesc[0] : null,
+      oldestSampledTs: tsDesc[tsDesc.length - 1] ?? null,
+      topicHist: Object.fromEntries(Object.entries(topicHist)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => [k, { count: v, sig: known.get(k) || null }])),
+      interArrival: gapStats(tsDesc),
+      recent: logs.slice(-12).reverse().map((l) => ({
+        block: Number(BigInt(l.blockNumber)), tx: l.transactionHash,
+        topic0: l.topics[0], sig: known.get(l.topics[0]) || null,
+        topics: l.topics.length, dataLen: (l.data || '0x').length,
+        ts: times.get(Number(BigInt(l.blockNumber))) ?? null,
       })),
     });
   }
+
+  // $CME burn path (Task K): Transfer(_, 0x0, _) on the token.
+  const burnLogs = await scanLogsBack({
+    address: DOC_ADDRESSES.CME,
+    topics: [keccakHex('Transfer(address,address,uint256)'), null,
+             '0x0000000000000000000000000000000000000000000000000000000000000000'],
+  }, { head, want: 200, maxBack, chunk: Number(process.env.LOG_CHUNK || 20000) });
+  const bblocks = [...new Set(burnLogs.logs.map((l) => Number(BigInt(l.blockNumber))))].sort((a, b) => b - a);
+  const btimes = new Map();
+  for (const b of bblocks.slice(0, 100)) btimes.set(b, await blockTime(b));
+  emit('CME_BURNS', {
+    token: DOC_ADDRESSES.CME, count: burnLogs.logs.length,
+    scannedFrom: burnLogs.scannedFrom, scannedTo: burnLogs.scannedTo,
+    newestTs: btimes.get(bblocks[0]) ?? null,
+    newestIso: btimes.get(bblocks[0]) ? new Date(btimes.get(bblocks[0]) * 1000).toISOString() : null,
+    totalBurnedInWindow: burnLogs.logs
+      .reduce((a, l) => a + (l.data && l.data !== '0x' ? BigInt(l.data) : 0n), 0n).toString(),
+    recent: burnLogs.logs.slice(-12).reverse().map((l) => ({
+      block: Number(BigInt(l.blockNumber)), tx: l.transactionHash,
+      from: wordToAddress(l.topics[1]),
+      value: l.data && l.data !== '0x' ? BigInt(l.data).toString() : null,
+      ts: btimes.get(Number(BigInt(l.blockNumber))) ?? null,
+    })),
+  });
+
+  // Explorer extras, best-effort — Blockscout answered 403 from this runner
+  // on the first run, so nothing downstream may depend on these.
+  const tok = await bs(`/api/v2/tokens/${DOC_ADDRESSES.CME}`);
+  emit('CME_TOKEN', tok.__error ? { __error: tok.__error } : tok);
 }
 
 // -------------------------------------------------------- phase: launches
 
 async function phaseLaunches() {
   const lp = DOC_ADDRESSES.LaunchpadV4;
-  const all = [];
-  for (let page = 1; page <= 5; page++) {
-    const t = await txListV1(lp, { page, offset: 100 });
-    if (!t || !t.length) break;
-    all.push(...t);
-    if (t.length < 100) break;
-  }
-  const methodHist = {};
-  for (const t of all) {
-    const m = (t.input || '0x').slice(0, 10);
-    methodHist[m] = (methodHist[m] || 0) + 1;
-  }
-  emit('LAUNCHES', {
-    address: lp, sampled: all.length, methodHist,
-    newest: all[0] ? { hash: all[0].hash, ts: Number(all[0].timeStamp), block: Number(all[0].blockNumber) } : null,
-    oldest: all.length ? { hash: all[all.length-1].hash, ts: Number(all[all.length-1].timeStamp), block: Number(all[all.length-1].blockNumber) } : null,
-    recent: all.slice(0, 30).map((t) => ({
-      hash: t.hash, ts: Number(t.timeStamp), block: Number(t.blockNumber),
-      from: t.from, method: (t.input || '0x').slice(0, 10), isError: t.isError,
-      inputLen: (t.input || '').length,
-    })),
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const known = new Map(EVENT_SIGS.map((sg) => [keccakHex(sg), sg]));
+
+  const { logs, scannedFrom, truncated } = await scanLogsBack({ address: lp }, {
+    head, want: 2000, maxBack: Number(process.env.MAX_BLOCKS_BACK || 3000000),
+    chunk: Number(process.env.LOG_CHUNK || 20000),
+    onProgress: (p) => note('  launchscan', p.from, '-', p.to, 'got', p.got, 'tot', p.total),
   });
 
-  // Internal token creations from the launchpad — this is how we find CAs.
+  // Group by event type; for each, collect the address-shaped topics. A
+  // launch event almost certainly indexes the new token CA.
+  const byTopic = {};
+  for (const l of logs) {
+    const t = l.topics[0];
+    (byTopic[t] ||= { count: 0, sig: known.get(t) || null, topicArity: l.topics.length, samples: [], addrs: new Set() }).count++;
+    const g = byTopic[t];
+    if (g.samples.length < 3) g.samples.push({ block: Number(BigInt(l.blockNumber)), tx: l.transactionHash, topics: l.topics, data: (l.data || '0x').slice(0, 260) });
+    for (const tp of l.topics.slice(1)) {
+      const a = wordToAddress(tp);
+      // address-shaped topic == 12 zero bytes then 20 bytes of address
+      if (a && !/^0x0+$/.test(a) && tp.slice(2, 26) === '0'.repeat(24)) g.addrs.add(a);
+    }
+  }
+  emit('LAUNCH_EVENTS', {
+    address: lp, logCount: logs.length, scannedFrom, scannedTo: head, truncated,
+    events: Object.fromEntries(Object.entries(byTopic).map(([k, v]) => [k, {
+      count: v.count, sig: v.sig, topicArity: v.topicArity,
+      distinctAddressTopics: v.addrs.size,
+      addrSample: [...v.addrs].slice(0, 25),
+      samples: v.samples,
+    }])),
+  });
+
+  // Candidate token CAs: every address-shaped indexed topic that has code.
+  const candidates = [...new Set(Object.values(byTopic).flatMap((v) => [...v.addrs]))];
+  note('candidate addresses from launchpad logs:', candidates.length);
+  const tokens = [];
+  for (const a of candidates.slice(0, 60)) {
+    const code = await rpcOk('eth_getCode', [a, 'latest']);
+    if (!code || code === '0x') continue;
+    const nm = await ethCall(a, 'name()');
+    const sy = await ethCall(a, 'symbol()');
+    const ts = await ethCall(a, 'totalSupply()');
+    const dec = await ethCall(a, 'decimals()');
+    tokens.push({
+      address: a, codeSize: (code.length - 2) / 2,
+      codeHash: bytesToHex(keccak256(hexToBytes(code))),
+      name: nm ? (decodeString(nm) || decodeBytes32String(nm)) : null,
+      symbol: sy ? (decodeString(sy) || decodeBytes32String(sy)) : null,
+      totalSupply: ts ? BigInt(ts).toString() : null,
+      decimals: dec ? Number(BigInt(dec)) : null,
+    });
+  }
+  emit('LAUNCH_TOKENS', { checked: Math.min(candidates.length, 60), withCode: tokens.length, tokens });
+
+  // Explorer extras, best-effort only.
   const internal = await bs(`/api?module=account&action=txlistinternal&address=${lp}&page=1&offset=100&sort=desc`);
   if (internal && internal.status === '1') {
     const creates = internal.result.filter((t) => t.type === 'create' || t.type === 'create2');
     emit('LAUNCH_CREATES', {
       total: internal.result.length, creates: creates.length,
-      recent: creates.slice(0, 30).map((t) => ({
-        hash: t.hash, ts: Number(t.timeStamp), contract: t.contractAddress, type: t.type,
-      })),
+      recent: creates.slice(0, 30).map((t) => ({ hash: t.hash, ts: Number(t.timeStamp), contract: t.contractAddress, type: t.type })),
     });
-  }
-
-  const head = await rpcOk('eth_blockNumber');
-  const headNum = toNum(head);
-  const logs = await rpcOk('eth_getLogs', [{
-    address: lp, fromBlock: numToHex(Math.max(0, headNum - LOG_CHUNK)), toBlock: 'latest',
-  }]);
-  if (Array.isArray(logs)) {
-    const topicHist = {};
-    for (const l of logs) topicHist[l.topics[0]] = (topicHist[l.topics[0]] || 0) + 1;
-    const known = new Map(EVENT_SIGS.map((s) => [keccakHex(s), s]));
-    emit('LAUNCH_LOGS', {
-      window: [Math.max(0, headNum - LOG_CHUNK), headNum], count: logs.length,
-      topicHist: Object.fromEntries(Object.entries(topicHist).map(([k, v]) => [k, { count: v, sig: known.get(k) || null }])),
-      sample: logs.slice(-5),
-    });
+  } else {
+    emit('LAUNCH_CREATES', { __error: (internal && internal.__error) || 'blockscout unavailable' });
   }
 }
 
