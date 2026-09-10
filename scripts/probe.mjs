@@ -16,7 +16,7 @@
 import http from 'node:http';
 import {
   rpc, rpcOk, bs, ethCall, encAddress, decodeWords, decodeString, decodeBytes32String,
-  decodeInt, parseMetadataFooter, extractPush4, extractPush20, readProxySlots,
+  decodeInt, parseMetadataFooter, extractPush4, extractPush20, readProxySlots, encUint,
   toBig, toNum, numToHex, wordToAddress, keccakHex, selector, keccak256, hexToBytes,
   bytesToHex, RPC_URL, BLOCKSCOUT, blockTime, measureBlockTime, scanLogsBack,
 } from './lib/chain.mjs';
