@@ -715,14 +715,24 @@ async function phaseTax() {
 
 // ------------------------------------------- phase: markets (Task C, D)
 
-// Immutables read out of the LaunchpadV4 runtime bytecode (grade B), then
-// confirmed by live call. Both are Uniswap v4 hooks: the low 14 bits of a v4
-// hook address encode its permissions, and these decode to real flag sets,
-// which is only true of a purpose-mined hook address.
+// Immutables read out of the LaunchpadV4 runtime bytecode (grade B).
+//
+// CORRECTION: 0x4acd728a... was briefly read here as a v4 hook because its low
+// 14 bits happen to decode to a plausible permission set. It is not. The launch
+// path contains the EIP-1167 minimal-proxy creation code
+//   3d602d80600a3d3981f3363d3d373d3d3d363d73 <impl> 5af43d82803e903d91602b57fd5bf3
+// with this address as <impl>, followed by CREATE. It is the ERC-20
+// IMPLEMENTATION every launched market token is cloned from, which is why all
+// 72 markets share one codehash. Reading hook flags off an arbitrary address is
+// meaningless -- every address has low bits.
 const LAUNCHPAD_IMMUTABLES = {
-  '0x069927f4': '0xe066bf07e29f5f80f24c4b6f77dee6b97f4a5000', // AFTER_INITIALIZE
-  '0x2f3a3d5d': '0x4acd728a45c3fe656ddc15ad7e734f69d6146748', // market hook, 6 permissions
+  '0x2f3a3d5d': '0x4acd728a45c3fe656ddc15ad7e734f69d6146748', // market-token implementation (clone target)
+  '0x069927f4': '0xe066bf07e29f5f80f24c4b6f77dee6b97f4a5000', // used in the migrate path; role not yet confirmed
 };
+
+// The official pool's hook is whatever the migrate path actually passes in the
+// PoolKey. Do not assume it -- read it off the Initialize events.
+const TOKEN_IMPLEMENTATION = '0x4acd728a45c3fe656ddc15ad7e734f69d6146748';
 
 const V4_HOOK_FLAGS = [
   [13, 'BEFORE_INITIALIZE'], [12, 'AFTER_INITIALIZE'],
@@ -856,7 +866,9 @@ async function phaseMarkets() {
     return [...out.values()].sort((a, b) => a.block - b.block);
   }
 
-  const OFFICIAL_HOOK = LAUNCHPAD_IMMUTABLES['0x2f3a3d5d'].toLowerCase();
+  // Determined empirically below from the pools of migrated markets, rather
+  // than assumed from an immutable.
+  const OFFICIAL_HOOK = (process.env.OFFICIAL_HOOK || '').toLowerCase();
   const joined = [];
   const allPools = [];
   for (const m of markets) {
@@ -967,19 +979,24 @@ async function main() {
 
 // Keep the container alive so logs survive and results stay fetchable.
 const port = Number(process.env.PORT || 3000);
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   res.setHeader('content-type', 'application/json');
   if (url.pathname === '/all') return res.end(JSON.stringify(RESULT));
   if (url.pathname.startsWith('/code/')) {
     // Plain text so it survives any markdown-ifying fetcher in between.
     const name = decodeURIComponent(url.pathname.slice(6));
-    const hex = CODE[name];
+    let hex = CODE[name];
+    if (!hex && /^0x[0-9a-fA-F]{40}$/.test(name)) {
+      // Allow pulling any contract on the chain, not just the named ones.
+      hex = await rpcOk('eth_getCode', [name, 'latest']);
+      if (hex && hex !== '0x') CODE[name] = hex; else hex = null;
+    }
     res.setHeader('content-type', 'text/plain');
     if (!hex) return res.end(`MISSING ${name}; have: ${Object.keys(CODE).join(',')}`);
     const start = Number(url.searchParams.get('start') || 0);
     const len = Number(url.searchParams.get('len') || hex.length);
-    return res.end(`${name} ${ALL_ADDRESSES[name]} chars=${hex.length} start=${start} len=${len}\n`
+    return res.end(`${name} ${ALL_ADDRESSES[name] || name} chars=${hex.length} start=${start} len=${len}\n`
       + hex.slice(start, start + len) + '\nEND');
   }
   if (url.pathname.startsWith('/s/')) {
