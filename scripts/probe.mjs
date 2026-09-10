@@ -787,7 +787,7 @@ async function phaseMarkets() {
     const rec = {
       id,
       token: wordToAddress(w[1]),
-      pairCoin: wordToAddress(w[2]),
+      creator: wordToAddress(w[2]),  // NOT the pair coin: mostly EOAs with no code, several are 23-byte EIP-7702 delegation designators
       field3: w[3] != null ? Number(BigInt(w[3])) : null,
       field5: w[5] != null ? Number(BigInt(w[5])) : null,
       createdAt: w[7] != null ? Number(BigInt(w[7])) : null,
@@ -796,7 +796,7 @@ async function phaseMarkets() {
       metadataUri: decodeString('0x' + r.result.slice(2).slice(2 * 32)) || null,
     };
     // Identify both addresses empirically rather than assuming which is which.
-    for (const [key, addr] of [['token', rec.token], ['pairCoin', rec.pairCoin]]) {
+    for (const [key, addr] of [['token', rec.token], ['creator', rec.creator]]) {
       if (!addr || /^0x0+$/.test(addr)) continue;
       const code = await rpcOk('eth_getCode', [addr, 'latest']);
       const info = { hasCode: !!(code && code !== '0x') };
@@ -823,13 +823,13 @@ async function phaseMarkets() {
   const hashes = {};
   for (const m of markets) { const h = m.tokenInfo && m.tokenInfo.codeHash; if (h) hashes[h] = (hashes[h] || 0) + 1; }
   const pairHist = {};
-  for (const m of markets) if (m.pairCoin) {
-    const k = `${m.pairCoin} ${(m.pairCoinInfo && m.pairCoinInfo.symbol) || '?'}`;
+  for (const m of markets) if (m.creator) {
+    const k = m.creator;
     pairHist[k] = (pairHist[k] || 0) + 1;
   }
   emit('MARKETS_CODEHASHES', {
     distinct: Object.keys(hashes).length, histogram: hashes,
-    pairCoinHistogram: pairHist,
+    creatorHistogram: pairHist,
   });
 
   // Pool discovery: ONE pass over Initialize, filtering against the token set
@@ -913,6 +913,22 @@ async function phaseMarkets() {
     note: 'official hook inferred as the most common non-zero hook across CME token pools; verify against a migration tx',
   });
 
+  // The matched set is tiny and is the single most important artifact in the
+  // whole analysis, so emit it whole rather than only in per-market slices.
+  emit('POOLS_DETAIL', matched.map((p) => {
+    const t = tokenSet.has(p.currency0.toLowerCase()) ? p.currency0 : p.currency1;
+    const m = markets.find((x) => x.token && x.token.toLowerCase() === t.toLowerCase());
+    return {
+      ...p,
+      cmeToken: t,
+      cmeSymbol: m && m.tokenInfo && m.tokenInfo.symbol,
+      cmeName: m && m.tokenInfo && m.tokenInfo.name,
+      marketId: m && m.id,
+      marketCreatedIso: m && m.createdIso,
+      feePercent: p.fee === DYNAMIC_FEE_FLAG ? 'DYNAMIC' : (p.fee / 10000).toFixed(4) + '%',
+    };
+  }));
+
   const byToken = new Map();
   for (const p of matched) {
     for (const c of [p.currency0.toLowerCase(), p.currency1.toLowerCase()]) {
@@ -933,7 +949,7 @@ async function phaseMarkets() {
     const other = ps.filter((p) => !(p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK));
     return {
       id: m.id, token: m.token, symbol: m.tokenInfo && m.tokenInfo.symbol,
-      pairCoin: m.pairCoin, createdIso: m.createdIso,
+      creator: m.creator, createdIso: m.createdIso,
       poolCount: ps.length,
       firstPoolBlock: ps[0] ? ps[0].block : null,
       officialPools: official.map(brief), otherPools: other.map(brief),
