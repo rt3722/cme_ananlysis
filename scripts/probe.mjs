@@ -34,12 +34,23 @@ const DOC_ADDRESSES = {
   PoolManagerV4:       '0x8366a39CC670B4001A1121B8F6A443A643e40951',
 };
 
+// Discovered by reading state rather than docs (see findings/task-A.md).
+// The hook is the contract a third-party router has to understand to trade
+// the official pool, and it is not published anywhere.
+const DISCOVERED_ADDRESSES = {
+  BuybackHook: '0xe5e702641ea86f4ae6cc3cdaed2b886f976be044',
+  USDG:        '0x5fc5360d0400a0fd4f2af552add042d716f1d168',
+  WETH:        '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+};
+const ALL_ADDRESSES = { ...DOC_ADDRESSES, ...DISCOVERED_ADDRESSES };
+
 const PHASES = (process.env.PROBE || 'map,liveness').split(',').map((s) => s.trim()).filter(Boolean);
 const MAX_BLOCKS_BACK = Number(process.env.MAX_BLOCKS_BACK || 500000);
 const LOG_CHUNK = Number(process.env.LOG_CHUNK || 10000);
 const TX_PAGE = Number(process.env.TX_PAGE || 50);
 
 const RESULT = { meta: {}, sections: {} };
+const CODE = {};   // name -> runtime bytecode hex, for /code/<name>
 const started = Date.now();
 
 // ------------------------------------------------------------------ logging
@@ -704,6 +715,19 @@ async function phaseTax() {
 
 // ------------------------------------------------------------------- main
 
+async function cacheBytecode() {
+  for (const [name, addr] of Object.entries(ALL_ADDRESSES)) {
+    const code = await rpcOk('eth_getCode', [addr, 'latest']);
+    if (code && code !== '0x') {
+      CODE[name] = code;
+      note('cached bytecode', name, addr, (code.length - 2) / 2, 'bytes');
+    }
+  }
+  emit('CODE_INDEX', Object.fromEntries(Object.entries(CODE)
+    .map(([n, c]) => [n, { address: ALL_ADDRESSES[n], bytes: (c.length - 2) / 2,
+                           hexChars: c.length, url: `/code/${n}` }])));
+}
+
 async function main() {
   const chainId = await rpcOk('eth_chainId');
   const head = await rpcOk('eth_blockNumber');
@@ -718,6 +742,7 @@ async function main() {
     docAddresses: DOC_ADDRESSES,
   };
   emit('CHAIN', RESULT.meta);
+  await cacheBytecode();
 
   if (chainId && toNum(chainId) !== 4663) note('WARNING: chainId is not 4663');
 
@@ -748,6 +773,17 @@ http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   res.setHeader('content-type', 'application/json');
   if (url.pathname === '/all') return res.end(JSON.stringify(RESULT));
+  if (url.pathname.startsWith('/code/')) {
+    // Plain text so it survives any markdown-ifying fetcher in between.
+    const name = decodeURIComponent(url.pathname.slice(6));
+    const hex = CODE[name];
+    res.setHeader('content-type', 'text/plain');
+    if (!hex) return res.end(`MISSING ${name}; have: ${Object.keys(CODE).join(',')}`);
+    const start = Number(url.searchParams.get('start') || 0);
+    const len = Number(url.searchParams.get('len') || hex.length);
+    return res.end(`${name} ${ALL_ADDRESSES[name]} chars=${hex.length} start=${start} len=${len}\n`
+      + hex.slice(start, start + len) + '\nEND');
+  }
   if (url.pathname.startsWith('/s/')) {
     const k = decodeURIComponent(url.pathname.slice(3));
     return res.end(JSON.stringify(RESULT.sections[k] ?? { __missing: k }));
