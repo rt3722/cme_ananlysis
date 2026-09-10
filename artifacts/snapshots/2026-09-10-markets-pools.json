@@ -1,0 +1,70 @@
+{
+  "_note": "Task C/D evidence. PROBE=markets on the Railway runner. The pool census is the decisive result of this session.",
+  "capturedAt": "2026-09-10T00:22:16Z",
+  "chain": { "chainId": 4663, "head": 58971442, "secondsPerBlock": 0.10077 },
+
+  "launchpad": {
+    "address": "0x741aE845F4F11B43467e7D0be991AD814E6Fc522",
+    "launchCount": 72,
+    "tokenImplementation": "0x4acd728a45c3fe656ddc15ad7e734f69d6146748",
+    "tokenImplementationNote": "EIP-1167 clone target. Launch path contains 3d602d80600a3d3981f3363d3d373d3d3d363d73<impl>5af43d82803e903d91602b57fd5bf3 then CREATE.",
+    "otherImmutable": "0xe066bf07e29f5f80f24c4b6f77dee6b97f4a5000",
+    "otherImmutableNote": "used in the migrate path; role NOT confirmed"
+  },
+
+  "markets": {
+    "count": 72,
+    "distinctCodeHashes": 1,
+    "codeHash": "0xa59f733a81e56b724a7843cc1cf74189e74642f70aa133b3ef94096a43df900b",
+    "codeSizeBytes": 45,
+    "codeSizeNote": "45 bytes is exactly the EIP-1167 minimal-proxy runtime -- every market token is a clone",
+    "fixedSupplyEach": "1000000000000000000000000000",
+    "fixedSupplyHuman": "1,000,000,000",
+    "openCapObserved": "5000",
+    "migrationCapObserved": "35000",
+    "capNote": "matches the documented $5,000 open / $35,000 migration caps exactly",
+    "creatorFeeBpsObserved": [100, 200, 300],
+    "creatorFeeNote": "matches the documented creator-chosen 1-3%",
+    "earliestCreated": "2026-09-08T05:53:40.000Z",
+    "creatorFieldNote": "launch-record word2 is the CREATOR, not a paired commodity: it has no code for most markets, and is a 23-byte EIP-7702 delegation designator (0xef0100 || address) for several others. An earlier draft mislabelled it as the pair coin.",
+    "sample": [
+      { "id": 0, "token": "0x91fb6560445c672c8763e51ba9903db157ab1e67", "symbol": "CAPE", "feeBps": 200, "createdIso": "2026-09-08T05:53:40.000Z" },
+      { "id": 1, "token": "0x508ed9f4dec13473179392cf39389f8a3eb43ac8", "symbol": "1PLS", "name": "Combo #1", "feeBps": 300, "createdIso": "2026-09-08T05:54:02.000Z" },
+      { "id": 3, "token": "0xfd760c0f228acbd03e0f265d7ac1cc4f58d8d935", "symbol": "MCI6900", "name": "McDonalds Index 6900", "feeBps": 200 },
+      { "id": 5, "token": "0x9d79b3403bc3dad82acbb7a3cbf6b85591a57c50", "symbol": "NUG", "name": "NUGGET", "feeBps": 200 },
+      { "id": 6, "token": "0x464b16b578005955959ff73c3dab10cf541d3cd2", "symbol": "SOY", "name": "SOYBOY", "feeBps": 200 }
+    ]
+  },
+
+  "poolCensus": {
+    "method": "single pass over v4 Initialize events on the PoolManager, filtered against the set of 72 market-token addresses",
+    "poolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+    "scannedFrom": 54971442,
+    "scannedTo": 58971442,
+    "blocksScanned": 4000000,
+    "approxDaysCovered": 4.66,
+    "windows": 202,
+    "chainWidePoolsSeen": 71413,
+    "poolsReferencingACmeMarketToken": 3,
+    "hookedCount": 0,
+    "hooklessCount": 3,
+    "hookHistogram": { "0x0000000000000000000000000000000000000000": 3 },
+    "feeHistogram": {
+      "200000": { "count": 1, "percent": "20.0000%" },
+      "900000": { "count": 1, "percent": "90.0000%" },
+      "993690": { "count": 1, "percent": "99.3690%" }
+    },
+    "feeUnitsNote": "Uniswap v4 fee is in hundredths of a bip; 1,000,000 = 100%",
+    "headline": [
+      "Of 72 launched CME markets, at most 3 have ANY Uniswap v4 pool.",
+      "ZERO pools carry a hook, so no market has an official hooked pool -- none has migrated.",
+      "All three existing pools are hookless third-party pools charging 20%, 90% and 99.369%."
+    ]
+  },
+
+  "caveats": [
+    "The 4,000,000-block window covers ~4.66 days at the measured block time; the earliest market was created 2026-09-08, about 2 days before capture, so the window covers the full life of every market.",
+    "A pool could exist on a non-v4 venue (a v3 factory, or another PoolManager). This census covers only PoolManager 0x8366a39c... Task D should widen it before claiming a token has no pool anywhere.",
+    "POOLS_DETAIL (per-pool token, tx hash and block for the three pools) was still being re-emitted when this snapshot was written -- see the next session's first action in SESSION-STATE.md."
+  ]
+}
