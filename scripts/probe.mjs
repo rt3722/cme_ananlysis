@@ -713,6 +713,159 @@ async function phaseTax() {
   }
 }
 
+// ------------------------------------------- phase: markets (Task C, D)
+
+// Immutables read out of the LaunchpadV4 runtime bytecode (grade B), then
+// confirmed by live call. Both are Uniswap v4 hooks: the low 14 bits of a v4
+// hook address encode its permissions, and these decode to real flag sets,
+// which is only true of a purpose-mined hook address.
+const LAUNCHPAD_IMMUTABLES = {
+  '0x069927f4': '0xe066bf07e29f5f80f24c4b6f77dee6b97f4a5000', // AFTER_INITIALIZE
+  '0x2f3a3d5d': '0x4acd728a45c3fe656ddc15ad7e734f69d6146748', // market hook, 6 permissions
+};
+
+const V4_HOOK_FLAGS = [
+  [13, 'BEFORE_INITIALIZE'], [12, 'AFTER_INITIALIZE'],
+  [11, 'BEFORE_ADD_LIQUIDITY'], [10, 'AFTER_ADD_LIQUIDITY'],
+  [9, 'BEFORE_REMOVE_LIQUIDITY'], [8, 'AFTER_REMOVE_LIQUIDITY'],
+  [7, 'BEFORE_SWAP'], [6, 'AFTER_SWAP'],
+  [5, 'BEFORE_DONATE'], [4, 'AFTER_DONATE'],
+  [3, 'BEFORE_SWAP_RETURNS_DELTA'], [2, 'AFTER_SWAP_RETURNS_DELTA'],
+  [1, 'AFTER_ADD_LIQUIDITY_RETURNS_DELTA'], [0, 'AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA'],
+];
+export function hookFlags(addr) {
+  if (!addr || /^0x0+$/.test(addr)) return { hook: addr, hooked: false, flags: [] };
+  const low = BigInt(addr) & 0x3fffn;
+  return {
+    hook: addr, hooked: true, low14: '0x' + low.toString(16).padStart(4, '0'),
+    flags: V4_HOOK_FLAGS.filter(([b]) => (low >> BigInt(b)) & 1n).map(([, n]) => n),
+  };
+}
+
+const DYNAMIC_FEE_FLAG = 0x800000;
+
+async function phaseMarkets() {
+  const lp = DOC_ADDRESSES.LaunchpadV4;
+  const head = toNum(await rpcOk('eth_blockNumber'));
+  const bt = await measureBlockTime(head, 200000);
+  const spb = bt ? bt.secondsPerBlock : 0.1;
+
+  const cntRaw = await ethCall(lp, 'launchCount()');
+  const count = cntRaw ? Number(BigInt(cntRaw)) : 0;
+  emit('MARKETS_PLAN', { launchpad: lp, launchCount: count, head, secondsPerBlock: spb,
+                         immutables: LAUNCHPAD_IMMUTABLES,
+                         hookDecode: Object.fromEntries(Object.entries(LAUNCHPAD_IMMUTABLES).map(([k, v]) => [k, hookFlags(v)])) });
+
+  // 0x85b12c7c(uint256) returns the full launch record. Dump id 0 raw so the
+  // field offsets can be calibrated rather than guessed.
+  const raw0 = await rpc('eth_call', [{ to: lp, data: '0x85b12c7c' + encUint(0) }, 'latest']);
+  emit('MARKETS_RAW0', { ok: !raw0.error, error: raw0.error || null,
+                         words: raw0.result ? decodeWords(raw0.result).slice(0, 24) : null });
+
+  // Collect token addresses: any address-shaped word in the record that has code.
+  const markets = [];
+  for (let id = 0; id < count; id++) {
+    const r = await rpc('eth_call', [{ to: lp, data: '0x85b12c7c' + encUint(id) }, 'latest']);
+    if (r.error) { markets.push({ id, __error: r.error.message }); continue; }
+    const words = decodeWords(r.result);
+    const addrs = [];
+    for (const w of words.slice(0, 12)) {
+      if (w.slice(2, 26) === '0'.repeat(24) && !/^0x0+$/.test(w)) addrs.push(wordToAddress(w));
+    }
+    const token = addrs[0] || null;
+    const rec = { id, token, otherAddresses: addrs.slice(1, 3) };
+    if (token) {
+      const code = await rpcOk('eth_getCode', [token, 'latest']);
+      rec.hasCode = !!(code && code !== '0x');
+      rec.codeSize = rec.hasCode ? (code.length - 2) / 2 : 0;
+      if (rec.hasCode) rec.codeHash = bytesToHex(keccak256(hexToBytes(code)));
+      const nm = await ethCall(token, 'name()');
+      const sy = await ethCall(token, 'symbol()');
+      const ts = await ethCall(token, 'totalSupply()');
+      rec.name = nm ? (decodeString(nm) || decodeBytes32String(nm)) : null;
+      rec.symbol = sy ? (decodeString(sy) || decodeBytes32String(sy)) : null;
+      rec.totalSupply = ts ? BigInt(ts).toString() : null;
+    }
+    markets.push(rec);
+    if (markets.length % 12 === 0) note('  markets', markets.length, '/', count);
+  }
+  for (let i = 0; i < markets.length; i += 10) {
+    emit(`MARKETS_${Math.floor(i / 10)}`, markets.slice(i, i + 10));
+  }
+
+  // Distinct launched-token code hashes: are all markets the same clone?
+  const hashes = {};
+  for (const m of markets) if (m.codeHash) hashes[m.codeHash] = (hashes[m.codeHash] || 0) + 1;
+  emit('MARKETS_CODEHASHES', { distinct: Object.keys(hashes).length, histogram: hashes });
+
+  // Every v4 pool ever initialised, decoded, then indexed by token.
+  const INIT = keccakHex('Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)');
+  const { logs, scannedFrom, truncated } = await scanLogsBack(
+    { address: DOC_ADDRESSES.PoolManagerV4, topics: [INIT] },
+    { head, want: 100000, maxBack: Number(process.env.MAX_BLOCKS_BACK || 3000000),
+      chunk: Number(process.env.LOG_CHUNK || 5000),
+      onProgress: (p) => { if (p.got) note('  poolscan', p.from, '-', p.to, 'got', p.got, 'tot', p.total); } });
+
+  const pools = logs.map((l) => {
+    const d = decodeWords(l.data);
+    const hooks = d[2] != null ? wordToAddress(d[2]) : null;
+    const fee = d[0] != null ? Number(BigInt(d[0])) : null;
+    return {
+      poolId: l.topics[1],
+      currency0: wordToAddress(l.topics[2]), currency1: wordToAddress(l.topics[3]),
+      fee, dynamicFee: fee === DYNAMIC_FEE_FLAG,
+      tickSpacing: d[1] != null ? decodeInt(d[1], 24) : null,
+      hooks, ...hookFlags(hooks),
+      block: Number(BigInt(l.blockNumber)), tx: l.transactionHash,
+    };
+  });
+
+  const feeHist = {}, hookHist = {}, curHist = {};
+  for (const p of pools) {
+    feeHist[p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee)] = (feeHist[p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee)] || 0) + 1;
+    hookHist[p.hooks] = (hookHist[p.hooks] || 0) + 1;
+    curHist[p.currency0] = (curHist[p.currency0] || 0) + 1;
+    curHist[p.currency1] = (curHist[p.currency1] || 0) + 1;
+  }
+  emit('POOLS_SUMMARY', {
+    poolManager: DOC_ADDRESSES.PoolManagerV4, scannedFrom, scannedTo: head, truncated,
+    total: pools.length, feeHist, hookHist,
+    hookedCount: pools.filter((p) => p.hooked).length,
+    hooklessCount: pools.filter((p) => !p.hooked).length,
+    topCurrencies: Object.entries(curHist).sort((a, b) => b[1] - a[1]).slice(0, 25),
+  });
+
+  // Join: for each launched token, which pools reference it, and are any hookless?
+  const byToken = new Map();
+  for (const p of pools) {
+    for (const c of [p.currency0, p.currency1]) {
+      if (!byToken.has(c)) byToken.set(c, []);
+      byToken.get(c).push(p);
+    }
+  }
+  const joined = markets.filter((m) => m.token).map((m) => {
+    const ps = byToken.get(m.token.toLowerCase()) || [];
+    const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === LAUNCHPAD_IMMUTABLES['0x2f3a3d5d'].toLowerCase());
+    const other = ps.filter((p) => !official.includes(p));
+    return {
+      id: m.id, token: m.token, symbol: m.symbol,
+      poolCount: ps.length,
+      officialPools: official.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, dynamicFee: p.dynamicFee, tickSpacing: p.tickSpacing, hooks: p.hooks, block: p.block, tx: p.tx })),
+      otherPools: other.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, tickSpacing: p.tickSpacing, hooks: p.hooks, hooked: p.hooked, block: p.block, tx: p.tx })),
+    };
+  });
+  for (let i = 0; i < joined.length; i += 8) {
+    emit(`MARKET_POOLS_${Math.floor(i / 8)}`, joined.slice(i, i + 8));
+  }
+  emit('MARKET_POOLS_SUMMARY', {
+    markets: joined.length,
+    withNoPoolAtAll: joined.filter((j) => j.poolCount === 0).length,
+    withOfficialPool: joined.filter((j) => j.officialPools.length).length,
+    withOtherPools: joined.filter((j) => j.otherPools.length).length,
+    withOnlyOtherPools: joined.filter((j) => !j.officialPools.length && j.otherPools.length).length,
+  });
+}
+
 // ------------------------------------------------------------------- main
 
 async function cacheBytecode() {
@@ -757,6 +910,7 @@ async function main() {
       else if (p === 'feed') await phaseFeed();
       else if (p === 'buyback') await phaseBuyback();
       else if (p === 'tax') await phaseTax();
+      else if (p === 'markets') await phaseMarkets();
       else note('unknown phase', p);
       ran.push(p);
     } catch (e) {
