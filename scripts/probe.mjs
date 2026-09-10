@@ -762,29 +762,45 @@ async function phaseMarkets() {
   emit('MARKETS_RAW0', { ok: !raw0.error, error: raw0.error || null,
                          words: raw0.result ? decodeWords(raw0.result).slice(0, 24) : null });
 
-  // Collect token addresses: any address-shaped word in the record that has code.
+  // Field layout calibrated against the raw id-0 dump (MARKETS_RAW0), not guessed:
+  //   word0 = ABI head offset (0x20) -- NOT an address; reading it as one was a bug
+  //   word1 = launched token CA        word2 = paired coin
+  //   word7 = uint64 creation timestamp
+  //   word12 = open cap (5000e18)      word13 = migration cap (35000e18)
+  //   word14/15 = offset+length of the metadata URI string
+  const dec18 = (w) => w == null ? null : (Number(BigInt(w) / 10n ** 14n) / 1e4).toString();
   const markets = [];
   for (let id = 0; id < count; id++) {
     const r = await rpc('eth_call', [{ to: lp, data: '0x85b12c7c' + encUint(id) }, 'latest']);
     if (r.error) { markets.push({ id, __error: r.error.message }); continue; }
-    const words = decodeWords(r.result);
-    const addrs = [];
-    for (const w of words.slice(0, 12)) {
-      if (w.slice(2, 26) === '0'.repeat(24) && !/^0x0+$/.test(w)) addrs.push(wordToAddress(w));
-    }
-    const token = addrs[0] || null;
-    const rec = { id, token, otherAddresses: addrs.slice(1, 3) };
-    if (token) {
-      const code = await rpcOk('eth_getCode', [token, 'latest']);
-      rec.hasCode = !!(code && code !== '0x');
-      rec.codeSize = rec.hasCode ? (code.length - 2) / 2 : 0;
-      if (rec.hasCode) rec.codeHash = bytesToHex(keccak256(hexToBytes(code)));
-      const nm = await ethCall(token, 'name()');
-      const sy = await ethCall(token, 'symbol()');
-      const ts = await ethCall(token, 'totalSupply()');
-      rec.name = nm ? (decodeString(nm) || decodeBytes32String(nm)) : null;
-      rec.symbol = sy ? (decodeString(sy) || decodeBytes32String(sy)) : null;
-      rec.totalSupply = ts ? BigInt(ts).toString() : null;
+    const w = decodeWords(r.result);
+    const rec = {
+      id,
+      token: wordToAddress(w[1]),
+      pairCoin: wordToAddress(w[2]),
+      field3: w[3] != null ? Number(BigInt(w[3])) : null,
+      field5: w[5] != null ? Number(BigInt(w[5])) : null,
+      createdAt: w[7] != null ? Number(BigInt(w[7])) : null,
+      createdIso: w[7] != null ? new Date(Number(BigInt(w[7])) * 1000).toISOString() : null,
+      openCap: dec18(w[12]), migrationCap: dec18(w[13]),
+      metadataUri: decodeString('0x' + r.result.slice(2).slice(2 * 32)) || null,
+    };
+    // Identify both addresses empirically rather than assuming which is which.
+    for (const [key, addr] of [['token', rec.token], ['pairCoin', rec.pairCoin]]) {
+      if (!addr || /^0x0+$/.test(addr)) continue;
+      const code = await rpcOk('eth_getCode', [addr, 'latest']);
+      const info = { hasCode: !!(code && code !== '0x') };
+      if (info.hasCode) {
+        info.codeSize = (code.length - 2) / 2;
+        info.codeHash = bytesToHex(keccak256(hexToBytes(code)));
+        const nm = await ethCall(addr, 'name()');
+        const sy = await ethCall(addr, 'symbol()');
+        const ts = await ethCall(addr, 'totalSupply()');
+        info.name = nm ? (decodeString(nm) || decodeBytes32String(nm)) : null;
+        info.symbol = sy ? (decodeString(sy) || decodeBytes32String(sy)) : null;
+        info.totalSupply = ts ? BigInt(ts).toString() : null;
+      }
+      rec[key + 'Info'] = info;
     }
     markets.push(rec);
     if (markets.length % 12 === 0) note('  markets', markets.length, '/', count);
@@ -795,8 +811,16 @@ async function phaseMarkets() {
 
   // Distinct launched-token code hashes: are all markets the same clone?
   const hashes = {};
-  for (const m of markets) if (m.codeHash) hashes[m.codeHash] = (hashes[m.codeHash] || 0) + 1;
-  emit('MARKETS_CODEHASHES', { distinct: Object.keys(hashes).length, histogram: hashes });
+  for (const m of markets) { const h = m.tokenInfo && m.tokenInfo.codeHash; if (h) hashes[h] = (hashes[h] || 0) + 1; }
+  const pairHist = {};
+  for (const m of markets) if (m.pairCoin) {
+    const k = `${m.pairCoin} ${(m.pairCoinInfo && m.pairCoinInfo.symbol) || '?'}`;
+    pairHist[k] = (pairHist[k] || 0) + 1;
+  }
+  emit('MARKETS_CODEHASHES', {
+    distinct: Object.keys(hashes).length, histogram: hashes,
+    pairCoinHistogram: pairHist,
+  });
 
   // Every v4 pool ever initialised, decoded, then indexed by token.
   const INIT = keccakHex('Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)');
@@ -843,12 +867,14 @@ async function phaseMarkets() {
       byToken.get(c).push(p);
     }
   }
-  const joined = markets.filter((m) => m.token).map((m) => {
+  const joined = markets.filter((m) => m.token && !/^0x0+$/.test(m.token)).map((m) => {
     const ps = byToken.get(m.token.toLowerCase()) || [];
     const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === LAUNCHPAD_IMMUTABLES['0x2f3a3d5d'].toLowerCase());
     const other = ps.filter((p) => !official.includes(p));
     return {
-      id: m.id, token: m.token, symbol: m.symbol,
+      id: m.id, token: m.token, symbol: m.tokenInfo && m.tokenInfo.symbol,
+      pairCoin: m.pairCoin, pairSymbol: m.pairCoinInfo && m.pairCoinInfo.symbol,
+      createdIso: m.createdIso,
       poolCount: ps.length,
       officialPools: official.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, dynamicFee: p.dynamicFee, tickSpacing: p.tickSpacing, hooks: p.hooks, block: p.block, tx: p.tx })),
       otherPools: other.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, tickSpacing: p.tickSpacing, hooks: p.hooks, hooked: p.hooked, block: p.block, tx: p.tx })),
