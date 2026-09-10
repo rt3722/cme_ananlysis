@@ -822,15 +822,14 @@ async function phaseMarkets() {
     pairCoinHistogram: pairHist,
   });
 
-  // Every v4 pool ever initialised, decoded, then indexed by token.
+  // Uniswap v4 Initialize indexes BOTH currencies as topics, so pools can be
+  // found per token instead of scanning every pool on the chain. The
+  // PoolManager is chain-wide -- an unfiltered scan turns up ~100k pools that
+  // have nothing to do with CME. Two targeted queries per token (currency0
+  // slot, then currency1 slot) are cheap, exact, and cover full history.
   const INIT = keccakHex('Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)');
-  const { logs, scannedFrom, truncated } = await scanLogsBack(
-    { address: DOC_ADDRESSES.PoolManagerV4, topics: [INIT] },
-    { head, want: 100000, maxBack: Number(process.env.MAX_BLOCKS_BACK || 3000000),
-      chunk: Number(process.env.LOG_CHUNK || 5000),
-      onProgress: (p) => { if (p.got) note('  poolscan', p.from, '-', p.to, 'got', p.got, 'tot', p.total); } });
-
-  const pools = logs.map((l) => {
+  const pad = (a) => '0x' + a.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  const decodePool = (l) => {
     const d = decodeWords(l.data);
     const hooks = d[2] != null ? wordToAddress(d[2]) : null;
     const fee = d[0] != null ? Number(BigInt(d[0])) : null;
@@ -842,46 +841,65 @@ async function phaseMarkets() {
       hooks, ...hookFlags(hooks),
       block: Number(BigInt(l.blockNumber)), tx: l.transactionHash,
     };
-  });
+  };
 
-  const feeHist = {}, hookHist = {}, curHist = {};
-  for (const p of pools) {
-    feeHist[p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee)] = (feeHist[p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee)] || 0) + 1;
-    hookHist[p.hooks] = (hookHist[p.hooks] || 0) + 1;
-    curHist[p.currency0] = (curHist[p.currency0] || 0) + 1;
-    curHist[p.currency1] = (curHist[p.currency1] || 0) + 1;
-  }
-  emit('POOLS_SUMMARY', {
-    poolManager: DOC_ADDRESSES.PoolManagerV4, scannedFrom, scannedTo: head, truncated,
-    total: pools.length, feeHist, hookHist,
-    hookedCount: pools.filter((p) => p.hooked).length,
-    hooklessCount: pools.filter((p) => !p.hooked).length,
-    topCurrencies: Object.entries(curHist).sort((a, b) => b[1] - a[1]).slice(0, 25),
-  });
-
-  // Join: for each launched token, which pools reference it, and are any hookless?
-  const byToken = new Map();
-  for (const p of pools) {
-    for (const c of [p.currency0, p.currency1]) {
-      if (!byToken.has(c)) byToken.set(c, []);
-      byToken.get(c).push(p);
+  const maxBack = Number(process.env.MAX_BLOCKS_BACK || 6000000);
+  const poolChunk = Number(process.env.POOL_CHUNK || 200000);
+  async function poolsForToken(token) {
+    const out = new Map();
+    for (const slot of [2, 3]) {
+      const topics = slot === 2 ? [INIT, null, pad(token)] : [INIT, null, null, pad(token)];
+      const { logs } = await scanLogsBack({ address: DOC_ADDRESSES.PoolManagerV4, topics },
+        { head, want: 500, maxBack, chunk: poolChunk });
+      for (const l of logs) out.set(l.topics[1], decodePool(l));
     }
+    return [...out.values()].sort((a, b) => a.block - b.block);
   }
-  const joined = markets.filter((m) => m.token && !/^0x0+$/.test(m.token)).map((m) => {
-    const ps = byToken.get(m.token.toLowerCase()) || [];
-    const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === LAUNCHPAD_IMMUTABLES['0x2f3a3d5d'].toLowerCase());
-    const other = ps.filter((p) => !official.includes(p));
-    return {
+
+  const OFFICIAL_HOOK = LAUNCHPAD_IMMUTABLES['0x2f3a3d5d'].toLowerCase();
+  const joined = [];
+  const allPools = [];
+  for (const m of markets) {
+    if (!m.token || /^0x0+$/.test(m.token)) continue;
+    const ps = await poolsForToken(m.token);
+    allPools.push(...ps);
+    const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK);
+    const other = ps.filter((p) => !(p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK));
+    const brief = (p) => ({
+      poolId: p.poolId,
+      pairedWith: p.currency0.toLowerCase() === m.token.toLowerCase() ? p.currency1 : p.currency0,
+      fee: p.fee, dynamicFee: p.dynamicFee, tickSpacing: p.tickSpacing,
+      hooks: p.hooks, hooked: p.hooked, flags: p.flags,
+      block: p.block, tx: p.tx,
+    });
+    joined.push({
       id: m.id, token: m.token, symbol: m.tokenInfo && m.tokenInfo.symbol,
       pairCoin: m.pairCoin, pairSymbol: m.pairCoinInfo && m.pairCoinInfo.symbol,
       createdIso: m.createdIso,
       poolCount: ps.length,
-      officialPools: official.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, dynamicFee: p.dynamicFee, tickSpacing: p.tickSpacing, hooks: p.hooks, block: p.block, tx: p.tx })),
-      otherPools: other.map((p) => ({ poolId: p.poolId, pair: p.currency0 === m.token.toLowerCase() ? p.currency1 : p.currency0, fee: p.fee, tickSpacing: p.tickSpacing, hooks: p.hooks, hooked: p.hooked, block: p.block, tx: p.tx })),
-    };
+      firstPoolBlock: ps[0] ? ps[0].block : null,
+      officialPools: official.map(brief),
+      otherPools: other.map(brief),
+    });
+    if (joined.length % 10 === 0) note('  pools joined', joined.length, '/', markets.length);
+  }
+
+  const feeHist = {}, hookHist = {};
+  for (const p of allPools) {
+    const fk = p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee);
+    feeHist[fk] = (feeHist[fk] || 0) + 1;
+    hookHist[p.hooks] = (hookHist[p.hooks] || 0) + 1;
+  }
+  emit('POOLS_SUMMARY', {
+    scope: 'pools referencing a CME launched token (targeted topic queries, full history)',
+    poolManager: DOC_ADDRESSES.PoolManagerV4, maxBack, total: allPools.length,
+    feeHist, hookHist,
+    hookedCount: allPools.filter((p) => p.hooked).length,
+    hooklessCount: allPools.filter((p) => !p.hooked).length,
+    officialHook: OFFICIAL_HOOK,
   });
-  for (let i = 0; i < joined.length; i += 8) {
-    emit(`MARKET_POOLS_${Math.floor(i / 8)}`, joined.slice(i, i + 8));
+  for (let i = 0; i < joined.length; i += 6) {
+    emit(`MARKET_POOLS_${Math.floor(i / 6)}`, joined.slice(i, i + 6));
   }
   emit('MARKET_POOLS_SUMMARY', {
     markets: joined.length,
