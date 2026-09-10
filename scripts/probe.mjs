@@ -832,13 +832,18 @@ async function phaseMarkets() {
     pairCoinHistogram: pairHist,
   });
 
-  // Uniswap v4 Initialize indexes BOTH currencies as topics, so pools can be
-  // found per token instead of scanning every pool on the chain. The
-  // PoolManager is chain-wide -- an unfiltered scan turns up ~100k pools that
-  // have nothing to do with CME. Two targeted queries per token (currency0
-  // slot, then currency1 slot) are cheap, exact, and cover full history.
+  // Pool discovery: ONE pass over Initialize, filtering against the token set
+  // as we go.
+  //
+  // Two designs were tried and rejected. Scanning every pool and keeping them
+  // all blows up -- the v4 PoolManager here is chain-wide and holds ~100k pools
+  // that have nothing to do with CME. Querying per token by indexed currency is
+  // exact but needs 144 separate history scans, and the node's eth_getLogs range
+  // cap makes each one thrash. Filtering during a single pass keeps memory flat
+  // and costs one scan.
   const INIT = keccakHex('Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)');
-  const pad = (a) => '0x' + a.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  const tokenSet = new Set(markets.filter((m) => m.token && !/^0x0+$/.test(m.token))
+    .map((m) => m.token.toLowerCase()));
   const decodePool = (l) => {
     const d = decodeWords(l.data);
     const hooks = d[2] != null ? wordToAddress(d[2]) : null;
@@ -854,61 +859,85 @@ async function phaseMarkets() {
   };
 
   const maxBack = Number(process.env.MAX_BLOCKS_BACK || 6000000);
-  const poolChunk = Number(process.env.POOL_CHUNK || 200000);
-  async function poolsForToken(token) {
-    const out = new Map();
-    for (const slot of [2, 3]) {
-      const topics = slot === 2 ? [INIT, null, pad(token)] : [INIT, null, null, pad(token)];
-      const { logs } = await scanLogsBack({ address: DOC_ADDRESSES.PoolManagerV4, topics },
-        { head, want: 500, maxBack, chunk: poolChunk });
-      for (const l of logs) out.set(l.topics[1], decodePool(l));
+  const chunk = Number(process.env.POOL_CHUNK || 20000);
+  const floor = Math.max(0, head - maxBack);
+  const matched = [];
+  let scanned = 0, windows = 0, chainWidePools = 0;
+  let to = head, cur = chunk, best = 0;
+  while (to > floor) {
+    const from = Math.max(floor, to - cur);
+    const { result, error } = await rpc('eth_getLogs', [{
+      address: DOC_ADDRESSES.PoolManagerV4, topics: [INIT],
+      fromBlock: numToHex(from), toBlock: numToHex(to),
+    }], { retries: 1 });
+    if (error) {
+      if (cur > 500) { cur = Math.max(500, Math.floor(cur / 4)); continue; }
+      to = from - 1; cur = best || chunk; continue;
     }
-    return [...out.values()].sort((a, b) => a.block - b.block);
+    windows++; best = Math.max(best, cur);
+    chainWidePools += result.length;
+    for (const l of result) {
+      const c0 = wordToAddress(l.topics[2]).toLowerCase();
+      const c1 = wordToAddress(l.topics[3]).toLowerCase();
+      if (tokenSet.has(c0) || tokenSet.has(c1)) matched.push(decodePool(l));
+    }
+    scanned += (to - from + 1);
+    to = from - 1;
+    if (cur < chunk) cur = Math.min(chunk, cur * 2);
+    if (windows % 50 === 0) note('  poolscan at', from, 'chainWide', chainWidePools, 'cme', matched.length);
   }
+  note('poolscan complete: windows', windows, 'chainWide', chainWidePools, 'cme-matched', matched.length);
 
-  // Determined empirically below from the pools of migrated markets, rather
-  // than assumed from an immutable.
-  const OFFICIAL_HOOK = (process.env.OFFICIAL_HOOK || '').toLowerCase();
-  const joined = [];
-  const allPools = [];
-  for (const m of markets) {
-    if (!m.token || /^0x0+$/.test(m.token)) continue;
-    const ps = await poolsForToken(m.token);
-    allPools.push(...ps);
-    const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK);
-    const other = ps.filter((p) => !(p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK));
+  // What hook do the launchpad's own pools use? Read it, do not assume it.
+  const hookHist = {}, feeHist = {};
+  for (const p of matched) {
+    hookHist[p.hooks] = (hookHist[p.hooks] || 0) + 1;
+    const fk = p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee);
+    feeHist[fk] = (feeHist[fk] || 0) + 1;
+  }
+  const rankedHooks = Object.entries(hookHist).sort((a, b) => b[1] - a[1]);
+  const OFFICIAL_HOOK = (process.env.OFFICIAL_HOOK
+    || (rankedHooks.find(([h]) => !/^0x0+$/.test(h)) || [''])[0]).toLowerCase();
+
+  emit('POOLS_SUMMARY', {
+    scope: 'v4 Initialize events referencing a CME launched token',
+    poolManager: DOC_ADDRESSES.PoolManagerV4,
+    scannedFrom: floor, scannedTo: head, windows,
+    chainWidePoolsSeen: chainWidePools,
+    cmeTokenPools: matched.length,
+    feeHist, hookHist,
+    hookedCount: matched.filter((p) => p.hooked).length,
+    hooklessCount: matched.filter((p) => !p.hooked).length,
+    inferredOfficialHook: OFFICIAL_HOOK,
+    inferredOfficialHookFlags: hookFlags(OFFICIAL_HOOK).flags,
+    note: 'official hook inferred as the most common non-zero hook across CME token pools; verify against a migration tx',
+  });
+
+  const byToken = new Map();
+  for (const p of matched) {
+    for (const c of [p.currency0.toLowerCase(), p.currency1.toLowerCase()]) {
+      if (!tokenSet.has(c)) continue;
+      if (!byToken.has(c)) byToken.set(c, []);
+      byToken.get(c).push(p);
+    }
+  }
+  const joined = markets.filter((m) => m.token && !/^0x0+$/.test(m.token)).map((m) => {
+    const ps = (byToken.get(m.token.toLowerCase()) || []).sort((a, b) => a.block - b.block);
     const brief = (p) => ({
       poolId: p.poolId,
       pairedWith: p.currency0.toLowerCase() === m.token.toLowerCase() ? p.currency1 : p.currency0,
       fee: p.fee, dynamicFee: p.dynamicFee, tickSpacing: p.tickSpacing,
-      hooks: p.hooks, hooked: p.hooked, flags: p.flags,
-      block: p.block, tx: p.tx,
+      hooks: p.hooks, hooked: p.hooked, flags: p.flags, block: p.block, tx: p.tx,
     });
-    joined.push({
+    const official = ps.filter((p) => p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK);
+    const other = ps.filter((p) => !(p.hooks && p.hooks.toLowerCase() === OFFICIAL_HOOK));
+    return {
       id: m.id, token: m.token, symbol: m.tokenInfo && m.tokenInfo.symbol,
-      pairCoin: m.pairCoin, pairSymbol: m.pairCoinInfo && m.pairCoinInfo.symbol,
-      createdIso: m.createdIso,
+      pairCoin: m.pairCoin, createdIso: m.createdIso,
       poolCount: ps.length,
       firstPoolBlock: ps[0] ? ps[0].block : null,
-      officialPools: official.map(brief),
-      otherPools: other.map(brief),
-    });
-    if (joined.length % 10 === 0) note('  pools joined', joined.length, '/', markets.length);
-  }
-
-  const feeHist = {}, hookHist = {};
-  for (const p of allPools) {
-    const fk = p.dynamicFee ? 'DYNAMIC(0x800000)' : String(p.fee);
-    feeHist[fk] = (feeHist[fk] || 0) + 1;
-    hookHist[p.hooks] = (hookHist[p.hooks] || 0) + 1;
-  }
-  emit('POOLS_SUMMARY', {
-    scope: 'pools referencing a CME launched token (targeted topic queries, full history)',
-    poolManager: DOC_ADDRESSES.PoolManagerV4, maxBack, total: allPools.length,
-    feeHist, hookHist,
-    hookedCount: allPools.filter((p) => p.hooked).length,
-    hooklessCount: allPools.filter((p) => !p.hooked).length,
-    officialHook: OFFICIAL_HOOK,
+      officialPools: official.map(brief), otherPools: other.map(brief),
+    };
   });
   for (let i = 0; i < joined.length; i += 6) {
     emit(`MARKET_POOLS_${Math.floor(i / 6)}`, joined.slice(i, i + 6));
